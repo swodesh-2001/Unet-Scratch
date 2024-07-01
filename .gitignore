@@ -1,1 +1,6 @@
+microscope_data
+saved_images
 Unet.pdf
+debugging.ipynb
+__pycache__/
+models/
