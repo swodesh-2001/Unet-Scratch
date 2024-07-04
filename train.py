@@ -1,59 +1,53 @@
+import argparse
 import torch
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
-from tqdm import tqdm
 import torch.nn as nn
 import torch.optim as optim
-from model import UNET
+import engine,models,utils 
+from torch.utils.tensorboard import SummaryWriter
 
-from utils import(
-    load_checkpoint,
-    save_checkpoint,
-    get_loaders,
-    check_accuracy,
-    save_predictions_as_imgs,
-)
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
+def parse_args():
+    parser = argparse.ArgumentParser(description=" Script for UNET From Scratch")
 
-# HYPERPARAMETERS
-LEARNING_RATE = 1e-4
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-BATCH_SIZE = 4
-NUM_EPOCHS = 1
-NUM_WORKERS = 2
-IMAGE_HEIGHT = 160
-IMAGE_WIDTH = 240
-PIN_MEMORY = True
-LOAD_MODEL =  False
-TRAIN_DIR = "/home/swodesh/Documents/swodesh-2001/Unet/microscope_data/train"
-VAL_DIR = "/home/swodesh/Documents/swodesh-2001/Unet/microscope_data/validation"
+    # Hyperparameters
+    parser.add_argument('--num_epochs', type=int, default=2, help='Number of epochs to train for')
+    parser.add_argument('--batch_size', type=int, default=4, help='Batch size for training')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='Learning rate for the optimizer')
+    parser.add_argument('--image_height', type=int, default=160, help='Height of the input images')
+    parser.add_argument('--image_width', type=int, default=240, help='Width of the input images')
+    parser.add_argument('--pin_memory', type=bool, default=True, help='Pin memory for DataLoader')
+    parser.add_argument('--load_model', type=bool, default= True, help='Load pre-trained model')
+    parser.add_argument('--verbose', type=bool, default= True, help='Whether to display training info or not')
+    parser.add_argument('--num_workers', type=int, default=2, help='Number of workers for DataLoader')
+    parser.add_argument('--load_model_path', type=str, default='./models/final.pth.tar', help='Path to the pre-trained model')
 
+    # Directories
+    parser.add_argument('--train_dir', type=str, default='./microscope_data/train', help='Directory for training data')
+    parser.add_argument('--test_dir', type=str, default='./microscope_data/validation', help='Directory for validation data')
 
-def train(loader, model, optimizer, loss_fn , scaler):
-    loop = tqdm(loader)
-
-    for batch_idx, (data, targets) in enumerate(loop):
-        data = data.to(device = DEVICE)
-        targets = targets.float().unsqueeze(1).to(device = DEVICE)
-
-        # forward
-        with torch.cuda.amp.autocast():
-            predictions = model(data)
-            loss = loss_fn(predictions, targets)
-
-        # backward
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()
-
-
-        # update tqdm loop
-        loop.set_postfix(loss = loss.item())
-
+    args = parser.parse_args()
+    return args
 
 
 def main():
+    args = parse_args()
+    NUM_EPOCHS = args.num_epochs
+    BATCH_SIZE = args.batch_size
+    LEARNING_RATE = args.learning_rate
+    IMAGE_HEIGHT = args.image_height
+    IMAGE_WIDTH = args.image_width
+    PIN_MEMORY = args.pin_memory
+    LOAD_MODEL = args.load_model
+    NUM_WORKERS = args.num_workers
+    LOAD_MODEL_PATH = args.load_model_path
+    VERBOSE = args.verbose
+    TRAIN_DIR = args.train_dir
+    TEST_DIR = args.test_dir
+
+    writer = SummaryWriter(log_dir='./logs')
     train_transform = A.Compose(
 
         [
@@ -71,7 +65,7 @@ def main():
         ]
     )
 
-    val_transform = A.Compose(
+    test_transform = A.Compose(
         [
             A.Resize( height= IMAGE_HEIGHT, width = IMAGE_WIDTH ) ,
             A.Normalize(
@@ -83,51 +77,47 @@ def main():
             ToTensorV2(),
         ]
     )
-
-
-    model = UNET(in_channels=3 , out_channels=1).to(DEVICE)
-
-    if LOAD_MODEL :
-        load_checkpoint(torch.load("models/my_checkpoint.pth.tar"), model)
-
-    loss_fn = nn.BCEWithLogitsLoss() # For multiclass use cross entropy loss
-    optimizer = optim.Adam(model.parameters(), lr= LEARNING_RATE)
-    train_loader, val_loader = get_loaders(
+    train_loader, test_loader = utils.get_loaders(
 
         TRAIN_DIR,
-        VAL_DIR,
+        TEST_DIR,
         BATCH_SIZE,
         train_transform,
-        val_transform,
+        test_transform,
         NUM_WORKERS,
         PIN_MEMORY,
     )
 
+    model = models.UNET(in_channels=3 , out_channels=1).to(device)
 
-    scaler = torch.cuda.amp.GradScaler()
-    for epoch in range(NUM_EPOCHS):
-        train(train_loader, model, optimizer, loss_fn, scaler)
+    if LOAD_MODEL :
+        utils.load_checkpoint(LOAD_MODEL_PATH, model)
+    
+    loss_fn = nn.BCEWithLogitsLoss() 
+    optimizer = optim.AdamW(model.parameters(), lr= LEARNING_RATE)
+    results = engine.train(model=model,
+                train_dataloader=train_loader,
+                test_dataloader=test_loader,
+                loss_fn=loss_fn,
+                verbose= VERBOSE, 
+                optimizer=optimizer,
+                epochs=NUM_EPOCHS,
+                device=device)
+    
+    for i, (train_loss, train_acc, test_loss, test_acc) in enumerate(zip(results['train_loss'], results['train_acc'], results['test_loss'], results['test_acc'])):
+        writer.add_scalar('Loss/train', train_loss, i)
+        writer.add_scalar('Accuracy/train', train_acc, i)
+        writer.add_scalar('Loss/valid', test_loss, i)
+        writer.add_scalar('Accuracy/valid', test_acc, i)
 
 
-        # Save model
-        checkpoint = {
+    checkpoint = {
             "state_dict" : model.state_dict(),
             "optimizer": optimizer.state_dict()
         }
+     
+    utils.save_checkpoint( checkpoint, model_name="./models/final.pth.tar")
 
-        save_checkpoint(checkpoint)
 
-        check_accuracy(val_loader,model, device= DEVICE)
-
-        save_predictions_as_imgs(
-            val_loader, model, folder= "saved_images/" , device= DEVICE
-        )
-
- 
 if __name__ == "__main__" :
     main()
-
-
-
-
-
