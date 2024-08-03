@@ -1,7 +1,7 @@
 # UNet Implementation for Semantic Segmentation
 
 [Handwritten notes](https://drive.google.com/file/d/1LFzzrHczVCVWX7pMJoVUY-8Ye76rd0sq/view?usp=sharing)
-
+ 
 ## Table of Contents
 1. [Introduction](#introduction)
 2. [UNet Architecture](#unet-architecture)
